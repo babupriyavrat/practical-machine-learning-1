@@ -12,291 +12,215 @@ their behavior, or because they are tech geeks. One thing that people regularly 
    
 In this project, the goal is to use data from accelerometers on the belt, forearm, arm, and dumbell of 6 participants. They were asked to perform barbell lifts correctly and incorrectly in 5 different ways. More information is available from the website: [http://groupware.les.inf.puc-rio.br/har](http://groupware.les.inf.puc-rio.br/har) (see the section on the Weight Lifting Exercise Dataset).   
 
-### Preparing the data and R packages  
+### Loading Data
 
-#### Load packages, set caching 
-
-```{r, message=FALSE}
-require(caret)
-require(corrplot)
-require(Rtsne)
-require(xgboost)
-require(stats)
-require(knitr)
-require(ggplot2)
-knitr::opts_chunk$set(cache=TRUE)
-```
-For fast and accurate training the model, I choose XGBoost, an implementation of tree-based extreme gradient boosting algorithm. (*As discussed in the course's forum, this XGBoost tool is confirmed by course's CTA to be allowed to be used in this assignment project.*)   
-
-#### Getting Data
-```{r}
-# URL of the training and testing data
-train.url ="https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv"
-test.url = "https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv"
-# file names
-train.name = "./data/pml-training.csv"
-test.name = "./data/pml-testing.csv"
-# if directory does not exist, create new
-if (!file.exists("./data")) {
-  dir.create("./data")
-}
-# if files does not exist, download the files
-if (!file.exists(train.name)) {
-  download.file(train.url, destfile=train.name, method="curl")
-}
-if (!file.exists(test.name)) {
-  download.file(test.url, destfile=test.name, method="curl")
-}
-# load the CSV files as data.frame 
-train = read.csv("./data/pml-training.csv")
-test = read.csv("./data/pml-testing.csv")
-dim(train)
-dim(test)
-names(train)
-```  
-
-The raw training data has 19622 rows of observations and 158 features (predictors). Column `X` is unusable row number. While the testing data has 20 rows and the same 158 features. There is one column of target outcome named `classe`.   
-
-#### Data cleaning
-
-First, extract target outcome (the activity quality) from training data, so now the training data contains only the predictors (the activity monitors).   
-```{r}
-# target outcome (label)
-outcome.org = train[, "classe"]
-outcome = outcome.org 
-levels(outcome)
-```
-Outcome has 5 levels in character format.   
-Convert the outcome to numeric, because XGBoost gradient booster only recognizes numeric data.   
-```{r}
-# convert character levels to numeric
-num.class = length(levels(outcome))
-levels(outcome) = 1:num.class
-head(outcome)
-```
-   
-The outcome is removed from training data.   
-```{r}
-# remove outcome from train
-train$classe = NULL
-```
-
-The assignment rubric asks to use data from accelerometers on the `belt`, `forearm`, `arm`, and `dumbell`, so the features are extracted based on these keywords.   
-  
-```{r}
-# filter columns on: belt, forearm, arm, dumbell
-filter = grepl("belt|arm|dumbell", names(train))
-train = train[, filter]
-test = test[, filter]
-```
-
-Instead of less-accurate imputation of missing data, remove all columns with NA values.   
-```{r}
-# remove columns with NA, use test data as referal for NA
-cols.without.na = colSums(is.na(test)) == 0
-train = train[, cols.without.na]
-test = test[, cols.without.na]
-```
-
-### Preprocessing  
-
-#### Check for features's variance
-
-Based on the principal component analysis PCA, it is important that features have maximum variance for maximum uniqueness, so that each feature is as distant as possible (as orthogonal as possible) from the other features.   
-```{r}
-# check for zero variance
-zero.var = nearZeroVar(train, saveMetrics=TRUE)
-zero.var
-```
-There is no features without variability (all has enough variance). So there is no feature to be removed further.  
-
-#### Plot of relationship between features and outcome  
-
-Plot the relationship between features and outcome. From the plot below, each features has relatively the same distribution among the 5 outcome levels (A, B, C, D, E).   
-```{r fig.width=12, fig.height=8, dpi=72}
-featurePlot(train, outcome.org, "strip")
-```
-
-#### Plot of correlation matrix  
-
-Plot a correlation matrix between features.   
-A good set of features is when they are highly uncorrelated (orthogonal) each others. The plot below shows average of correlation is not too high, so I choose to not perform further PCA preprocessing.   
-```{r fig.width=12, fig.height=12, dpi=72}
-corrplot.mixed(cor(train), lower="circle", upper="color", 
-               tl.pos="lt", diag="n", order="hclust", hclust.method="complete")
-```
-
-#### tSNE plot 
-
-A tSNE (t-Distributed Stochastic Neighbor Embedding) visualization is 2D plot of multidimensional features, that is multidimensional reduction into 2D plane. In the tSNE plot below there is no clear separation of clustering of the 5 levels of outcome (A, B, C, D, E). So it hardly gets conclusion for manually building any regression equation from the irregularity.   
-
-```{r fig.width=12, fig.height=8, dpi=72}
-# t-Distributed Stochastic Neighbor Embedding
-tsne = Rtsne(as.matrix(train), check_duplicates=FALSE, pca=TRUE, 
-              perplexity=30, theta=0.5, dims=2)
-embedding = as.data.frame(tsne$Y)
-embedding$Class = outcome.org
-g = ggplot(embedding, aes(x=V1, y=V2, color=Class)) +
-  geom_point(size=1.25) +
-  guides(colour=guide_legend(override.aes=list(size=6))) +
-  xlab("") + ylab("") +
-  ggtitle("t-SNE 2D Embedding of 'Classe' Outcome") +
-  theme_light(base_size=20) +
-  theme(axis.text.x=element_blank(),
-        axis.text.y=element_blank())
-print(g)
-```
-
-### Build machine learning model 
-
-Now build a machine learning model to predict activity quality (`classe` outcome) from the activity monitors (the features or predictors) by using XGBoost extreme gradient boosting algorithm.    
-
-#### XGBoost data
-
-XGBoost supports only numeric matrix data. Converting all training, testing and outcome data to matrix.  
+all blanks, NA, #DIV/0! will be considered  as NA. Load the files into input and validation object. 
 
 ```{r}
-# convert data to matrix
-train.matrix = as.matrix(train)
-mode(train.matrix) = "numeric"
-test.matrix = as.matrix(test)
-mode(test.matrix) = "numeric"
-# convert outcome from factor to numeric matrix 
-#   xgboost takes multi-labels in [0, numOfClass)
-y = as.matrix(as.integer(outcome)-1)
+	input<- read.csv("pml-training.csv", na.strings = c("NA", "#DIV/0!", ""))
+	validation  <- read.csv("pml-testing.csv",  na.strings = c("NA", "#DIV/0!", ""))
+	names(input)
+
 ```
 
-#### XGBoost parameters 
+ [1] "X"                    "user_name"            "raw_timestamp_part_1" "raw_timestamp_part_2" "cvtd_timestamp"      
+ [6] "new_window"           "num_window"           "roll_belt"            "pitch_belt"           "yaw_belt"            
+[11] "total_accel_belt"     "gyros_belt_x"         "gyros_belt_y"         "gyros_belt_z"         "accel_belt_x"        
+[16] "accel_belt_y"         "accel_belt_z"         "magnet_belt_x"        "magnet_belt_y"        "magnet_belt_z"       
+[21] "roll_arm"             "pitch_arm"            "yaw_arm"              "total_accel_arm"      "gyros_arm_x"         
+[26] "gyros_arm_y"          "gyros_arm_z"          "accel_arm_x"          "accel_arm_y"          "accel_arm_z"         
+[31] "magnet_arm_x"         "magnet_arm_y"         "magnet_arm_z"         "roll_dumbbell"        "pitch_dumbbell"      
+[36] "yaw_dumbbell"         "total_accel_dumbbell" "gyros_dumbbell_x"     "gyros_dumbbell_y"     "gyros_dumbbell_z"    
+[41] "accel_dumbbell_x"     "accel_dumbbell_y"     "accel_dumbbell_z"     "magnet_dumbbell_x"    "magnet_dumbbell_y"   
+[46] "magnet_dumbbell_z"    "roll_forearm"         "pitch_forearm"        "yaw_forearm"          "total_accel_forearm" 
+[51] "gyros_forearm_x"      "gyros_forearm_y"      "gyros_forearm_z"      "accel_forearm_x"      "accel_forearm_y"     
+[56] "accel_forearm_z"      "magnet_forearm_x"     "magnet_forearm_y"     "magnet_forearm_z"     "classe"
 
-Set XGBoost parameters for cross validation and training.  
-Set a multiclass classification objective as the gradient boosting's learning function.   
-Set evaluation metric to `merror`, multiclass error rate.   
+###cleaning Data
+Now, it is imperative to remove NA values. So, we shall use columns only which have atleast one non-NA values
 
 ```{r}
-# xgboost parameters
-param <- list("objective" = "multi:softprob",    # multiclass classification 
-              "num_class" = num.class,    # number of classes 
-              "eval_metric" = "merror",    # evaluation metric 
-              "nthread" = 8,   # number of threads to be used 
-              "max_depth" = 16,    # maximum depth of tree 
-              "eta" = 0.3,    # step size shrinkage 
-              "gamma" = 0,    # minimum loss reduction 
-              "subsample" = 1,    # part of data instances to grow tree 
-              "colsample_bytree" = 1,  # subsample ratio of columns when constructing each tree 
-              "min_child_weight" = 12  # minimum sum of instance weight needed in a child 
-              )
+input =input[,colSums(is.na(validation)) == 0]
+validation=validation[,colSums(is.na(validation)) == 0]
+names(input)
 ```
 
-#### Expected error rate 
-
-Expected error rate is less than `1%` for a good classification. Do cross validation to estimate the error rate using 4-fold cross validation, with 200 epochs to reach the expected error rate of less than `1%`.  
-
-#### 4-fold cross validation  
+Now, the columns 1 to 6 is information for reference purpose. 7 doesn't contain the values of features mentioned in the problem, i.e., belt, forearm, arm, and dumbell.
+ so, let's remove it.
 
 ```{r}
-# set random seed, for reproducibility 
-set.seed(1234)
-# k-fold cross validation, with timing
-nround.cv = 200
-system.time( bst.cv <- xgb.cv(param=param, data=train.matrix, label=y, 
-              nfold=4, nrounds=nround.cv, prediction=TRUE, verbose=FALSE) )
+input = input[,8:60]
+validation= validation[,8:60]
 ```
 
-Elapsed time is around 150 seconds (2.5 minutes).  
+### Preprocessing
+
+Before preprocessing, let's partition the data into trainoingand testing set.
 
 ```{r}
-tail(bst.cv$dt) 
+library(caret)
+set.seed(11051985)
+inTrain <- createDataPartition(y=input$classe, p=0.70, list=FALSE)
+training  <- input[inTrain,]
+testing  <- input[-inTrain,]
 ```
-   
-From the cross validation, choose index with minimum multiclass error rate.  
-Index will be used in the model training to fulfill expected minimum error rate of `< 1%`.  
-```{r}
-# index of minimum merror
-min.merror.idx = which.min(bst.cv$dt[, test.merror.mean]) 
-min.merror.idx 
-# minimum merror
-bst.cv$dt[min.merror.idx,]
-```
-Best cross-validation's minimum error rate `test.merror.mean` is around 0.006 (0.6%), happened at 106th iteration.   
 
-#### Confusion matrix 
-
-Tabulates the cross-validation's predictions of the model against the truths.  
+check if there is any nearzerovalue covariates on training.
 
 ```{r}
-# get CV's prediction decoding
-pred.cv = matrix(bst.cv$pred, nrow=length(bst.cv$pred)/num.class, ncol=num.class)
-pred.cv = max.col(pred.cv, "last")
-# confusion matrix
-confusionMatrix(factor(y+1), factor(pred.cv))
+nsvCol =nearZeroVar(training)
+ nsvCol
+integer(0)
 ```
 
-Confusion matrix shows concentration of correct predictions is on the diagonal, as expected.  
-  
-The average accuracy is `99.38%`, with error rate is `0.62%`. So, expected error rate of less than `1%` is fulfilled.  
 
-#### Model training 
-
-Fit the XGBoost gradient boosting model on all of the training data.   
-```{r}
-# real model fit training, with full data
-system.time( bst <- xgboost(param=param, data=train.matrix, label=y, 
-                           nrounds=min.merror.idx, verbose=0) )
-```
-Time elapsed is around 35 seconds.  
-
-#### Predicting the testing data
+##Plotting Predictors
+Let's  create a decision tree model to see which features play a major role in classification.
 
 ```{r}
-# xgboost predict test data using the trained model
-pred <- predict(bst, test.matrix)  
-head(pred, 10)  
+ library(rpart.plot)
+ fitModel <- rpart(classe~., data=training, method="class")
+ library(rattle)
+ fancyRpartPlot(fitModel)
+```
+ 
+ we find that the following features play a major role in the classification.
+ roll_belt 
+ magnet_dumbbell_y
+ pitch_forearm
+ roll_forearm
+ total_accel_dumbbell
+ pitch_belt
+ magnet_dumbbell_z
+ accel_forearm_x
+ magnet_arm_y
+ yaw_belt
+ magnet_belt_z
+ magnet_forearm_z
+
+so, let's make a correlation matrix based on these features.
+
+```{r} 
+ traincorr= training[,c("roll_belt","magnet_dumbbell_y","pitch_forearm","roll_forearm","total_accel_dumbbell",
+ "pitch_belt","magnet_dumbbell_z","accel_forearm_x","magnet_arm_y","yaw_belt","magnet_belt_z","magnet_forearm_z")]
+ 
+library(corrgram) 
+ corrgram(traincorr,order=NULL,lower.panel=panel.pie,upper.panel=NULL,text.panel=panel.txt, main="test")
 ```
 
-#### Post-processing
+ there is only one correlation which is more than 75% i.e. correlation between yaw_belt and roll_belt. However, yaw_belt doesn't seems to be main variable as it appears low in 
+ decision tree.
 
-Output of prediction is the predicted probability of the 5 levels (columns) of outcome.  
-Decode the quantitative 5 levels of outcomes to qualitative letters (A, B, C, D, E).   
-  
-```{r}
-# decode prediction
-pred = matrix(pred, nrow=num.class, ncol=length(pred)/num.class)
-pred = t(pred)
-pred = max.col(pred, "last")
-pred.char = toupper(letters[pred])
-```
+###Creating a Prediction model
 
-(*The prediction result `pred.char` is not displayed intentionally due to Honour Code, because it is the answer of the "project submission" part.*)   
-
-#### Feature importance
-
-```{r fig.width=8, fig.height=12, dpi=72}
-# get the trained model
-model = xgb.dump(bst, with.stats=TRUE)
-# get the feature real names
-names = dimnames(train.matrix)[[2]]
-# compute feature importance matrix
-importance_matrix = xgb.importance(names, model=bst)
-
-# plot
-gp = xgb.plot.importance(importance_matrix)
-print(gp) 
-```
-
-Feature importance plot is useful to select only best features with highest correlation to the outcome(s). To improve model fitting performance (time or overfitting), less important features can be removed.   
-
-### Creating submission files 
+Using random forest and taking features only passing correlation matrix, I create the prediction model.
 
 ```{r}
-path = "./answer"
-pml_write_files = function(x) {
-    n = length(x)
-    for(i in 1: n) {
-        filename = paste0("problem_id_", i, ".txt")
-        write.table(x[i], file=file.path(path, filename), 
-                    quote=FALSE, row.names=FALSE, col.names=FALSE)
-    }
-}
-pml_write_files(pred.char)
+ set.seed(11051985)
+ Modelfit <- train(classe~roll_belt+magnet_dumbbell_y+pitch_forearm+roll_forearm+total_accel_dumbbell+pitch_belt+magnet_dumbbell_z+accel_forearm_x+magnet_arm_y+magnet_belt_z+magnet_forearm_z,
+                  data=training,
+                  method="rf",
+                  trControl=trainControl(method="cv",number=2),
+                  prox=TRUE,
+                  verbose=TRUE,
+                  allowParallel=TRUE)
+
+predictions <- predict(Modelfit, newdata=testing)
+confMatrix<- confusionMatrix(predictions, testing$classe)
+
+confMatrix
 ```
-------------------   
+
+Confusion Matrix and Statistics
+
+          Reference
+Prediction    A    B    C    D    E
+         A 1669    6    2    0    0
+         B    3 1116    4    3    2
+         C    2   15 1017   10    2
+         D    0    2    3  950    3
+         E    0    0    0    1 1075
+
+Overall Statistics
+                                          
+               Accuracy : 0.9901          
+                 95% CI : (0.9873, 0.9925)
+    No Information Rate : 0.2845          
+    P-Value [Acc > NIR] : < 2.2e-16       
+                                          
+                  Kappa : 0.9875          
+ Mcnemar's Test P-Value : NA              
+
+Statistics by Class:
+
+                     Class: A Class: B Class: C Class: D Class: E
+Sensitivity            0.9970   0.9798   0.9912   0.9855   0.9935
+Specificity            0.9981   0.9975   0.9940   0.9984   0.9998
+Pos Pred Value         0.9952   0.9894   0.9723   0.9916   0.9991
+Neg Pred Value         0.9988   0.9952   0.9981   0.9972   0.9985
+Prevalence             0.2845   0.1935   0.1743   0.1638   0.1839
+Detection Rate         0.2836   0.1896   0.1728   0.1614   0.1827
+Detection Prevalence   0.2850   0.1917   0.1777   0.1628   0.1828
+Balanced Accuracy      0.9976   0.9886   0.9926   0.9919   0.9967
+
+
+###Estimation of out-of-sample error rate
+
+
+```{r}
+errRate = sum(testing$classe!= predictions)/ length(predictions)
+errRate 
+```
+The  out-of-sample error rate is  00.9855565%
+ 
+ 
+###submission
+
+using validation file to create submission file.
+
+
+```{r}
+> predictions<- predict(Modelfit,newdata=validation)
+> validation$classe <- predictions
+> submission<-data.frame(problem_id = validation$problem_id,classe= predictions)
+> write.csv(submission,file="pml-submission.csv", row.names=FALSE)
+> answers=validation$classe
+> n=length(answers)
+> for(i in 1:n){
++     filename = paste0("problem_",i,".txt")
++     write.table(answers[i], file=filename, quote=FALSE, row.names=FALSE, col.names=FALSE)
++ }
+```
+
+Below is the answer generated.
+
+problem_id	classe
+1	B
+2	A
+3	B
+4	D
+5	A
+6	E
+7	D
+8	B
+9	A
+10	A
+11	B
+12	C
+13	B
+14	A
+15	E
+16	E
+17	A
+18	B
+19	B
+20	B
+	
+
+
+
+
+
+
+
+
