@@ -55,7 +55,7 @@ validation= validation[,8:60]
 
 ### Preprocessing
 
-Before preprocessing, let's partition the data into trainoingand testing set.
+Before preprocessing, let's partition the data into training and testing set.
 
 ```{r}
 library(caret)
